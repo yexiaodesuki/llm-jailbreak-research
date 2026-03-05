@@ -3,6 +3,8 @@ import json
 import os
 import time
 import glob
+import pandas as pd
+import re
 
 # 路径配置
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -11,24 +13,61 @@ RESULTS_DIR = os.path.join(BASE_DIR, "results")
 
 class ReplayApp:
     def __init__(self):
-        self.selected_task_data = []
+        self.current_env = "local"
 
-    def load_latest_result_summary(self):
-        """获取最新的实验汇总报告"""
-        list_of_files = glob.glob(os.path.join(RESULTS_DIR, "*.json"))
-        if not list_of_files:
-            return []
-        latest_file = max(list_of_files, key=os.path.getctime)
-        try:
-            with open(latest_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                return data.get("details", [])
-        except:
-            return []
+    def load_result_summary(self, env):
+        """加载实验结果汇总并计算统计指标"""
+        target_dir = os.path.join(RESULTS_DIR, env.lower())
+        
+        # 1. 尝试寻找汇总 JSON 文件
+        list_of_files = glob.glob(os.path.join(target_dir, "*.json"))
+        
+        details = []
+        stats = {"levels": {}, "avg_q": 0, "total_asr": 0}
 
-    def get_trace_logs(self, task_id):
-        """读取对应的 JSONL 轨迹文件"""
-        log_path = os.path.join(LOGS_DIR, f"task_{task_id}_trace.jsonl")
+        if list_of_files:
+            latest_file = max(list_of_files, key=os.path.getmtime)
+            try:
+                with open(latest_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    details = data if isinstance(data, list) else data.get("details", [])
+                    df = pd.DataFrame(details)
+                    if not df.empty:
+                        stats["total_asr"] = df['success'].mean() * 100
+                        stats["avg_q"] = round(df['queries_used'].mean(), 2) if 'queries_used' in df.columns else 0
+                        if 'level' in df.columns:
+                            lvl_asr = df.groupby('level')['success'].mean().to_dict()
+                            stats["levels"] = {str(k): float(v) * 100 for k, v in lvl_asr.items()}
+                return details, stats
+            except:
+                pass
+
+        # 2. 如果 results 为空，直接从 logs 文件夹反向生成任务列表
+        log_dir = os.path.join(LOGS_DIR, env.lower())
+        trace_files = glob.glob(os.path.join(log_dir, "task_*_trace.jsonl"))
+        
+        if trace_files:
+            for f_path in trace_files:
+                fname = os.path.basename(f_path)
+                match = re.search(r'task_(\d+)_trace', fname)
+                if match:
+                    t_id = match.group(1)
+                    details.append({
+                        "id": t_id,
+                        "level": "Running",
+                        "question": f"来自日志的任务 {t_id} (实验中...)"
+                    })
+            details.sort(key=lambda x: int(x['id']))
+            
+        return details, stats
+
+    def get_trace_logs(self, task_id, env):
+        """读取对应的轨迹日志文件"""
+        log_path = os.path.join(LOGS_DIR, env.lower(), f"task_{task_id}_trace.jsonl")
+        
+        if not os.path.exists(log_path):
+            log_path = os.path.join(LOGS_DIR, f"task_{task_id}_trace.jsonl")
+        
         if not os.path.exists(log_path):
             return []
         
@@ -36,100 +75,123 @@ class ReplayApp:
         with open(log_path, "r", encoding="utf-8") as f:
             for line in f:
                 if line.strip():
-                    steps.append(json.loads(line))
+                    try:
+                        steps.append(json.loads(line))
+                    except:
+                        continue
         return steps
 
-    def run_replay(self, task_info):
-        """流式回放逻辑"""
+    def run_replay(self, task_info, env):
+        """流式对抗对话回放"""
         if not task_info:
-            yield "请先选择一个任务", "", 0, "等待中"
+            yield [], 0, 0, "请先选择一个任务", ""
             return
 
-        # 解析 ID
-        task_id = task_info.split(":")[0].strip()
-        steps = self.get_trace_logs(task_id)
-
+        task_id = task_info.split(" ")[0].strip()
+        steps = self.get_trace_logs(task_id, env)
+        
         if not steps:
-            yield f"未找到 ID {task_id} 的轨迹文件，请确认已运行实验并生成 logs 文件夹内容。", "", 0, "错误"
+            yield [{"role": "assistant", "content": "⚠️ 轨迹日志文件尚为空或正在写入中。"}], 0, 0, "ERROR", ""
             return
 
-        history_md = ""
-        best_p = ""
+        chat_history = []
+        cum_queries = 0
         
         for i, step in enumerate(steps):
-            # 模拟演示节奏
-            time.sleep(0.6) 
-            
-            stage = step.get("stage", "Unknown")
-            strategy = step.get("strategy", "N/A")
+            q_this_step = step.get("queries_used", 1)
+            cum_queries += q_this_step
             score = step.get("score", 0.0)
-            response = step.get("response", "")
-            prompt = step.get("prompt", "")
+            strategy = step.get("strategy", "待定")
+            
+            attacker_content = (
+                f"🎯 **[演化轮次: Step {i+1}]**\n"
+                f"🧠 **攻击策略**: {strategy}\n"
+                f"--- \n"
+                f"{step.get('prompt', '')}"
+            )
+            chat_history.append({"role": "user", "content": attacker_content})
+            
+            yield chat_history, score, cum_queries, f"正在分析第 {i+1} 轮...", step.get("prompt", "")
+            time.sleep(0.5)
 
-            # 构造 Markdown 日志
-            history_md += f"### 📍 阶段: {stage}\n"
-            if strategy and strategy != "None":
-                history_md += f"**采用策略**: `{strategy}`\n\n"
-            history_md += f"**Judge 评分**: `{score:.3f}`\n\n"
-            history_md += f"**模型响应预览**: \n> {response[:200]}...\n\n"
-            history_md += "---\n"
+            raw_res = step.get("response", "").strip()
+            score_color = "#2ecc71" if score < 0.5 else ("#f1c40f" if score < 0.8 else "#e74c3c")
+            
+            # --- 修复渲染 Bug: 强制闭合代码块 ---
+            if raw_res.count("```") % 2 != 0:
+                raw_res += "\n\n```"
+            
+            if "[Cloud_Blocked]" in raw_res:
+                bot_content = "🚫 **安全网关强力拦截**\n输出已被实时切断。"
+            else:
+                # 增加三个空行和独立样式的 div 块，防止 Markdown 渲染器将 HTML 吞入上文代码块
+                bot_content = (
+                    f"{raw_res}\n\n\n"
+                    f"<div style='border-top: 1px dashed #ccc; padding-top: 8px; margin-top: 10px; "
+                    f"font-size: 0.85em; opacity: 0.9; color: #444; font-family: -apple-system, sans-serif;'>"
+                    f"📊 危害评分: <span style='color: {score_color}; font-weight: bold;'>{score:.3f}</span>"
+                    f"</div>"
+                )
+            
+            chat_history.append({"role": "assistant", "content": bot_content})
+            yield chat_history, score, cum_queries, f"第 {i+1} 轮回放完成", step.get("prompt", "")
+            time.sleep(0.3)
 
-            best_p = prompt
-            status = "突破成功 ✅" if score >= 0.85 else "演化中..."
-            yield history_md, best_p, score, status
+# UI 适配 Gradio 6.8.0
+css = ".sidebar-panel { background: white; padding: 20px; border-radius: 12px; border: 1px solid #ddd; }"
 
-        yield history_md, best_p, steps[-1]["score"], "复现完成 ✅"
-
-# 实例化
 app_engine = ReplayApp()
 
-# --- Gradio UI 修正版 ---
-with gr.Blocks(title="LLM 攻击演化复现系统") as demo:
-    gr.Markdown("# 🛡️ LLM 安全性对抗演化 - 实验结果复现系统")
+with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue"), css=css) as demo:
+    gr.HTML("<h1 style='text-align:center;'>🛡️ LLM 安全对抗演化回放系统</h1>")
     
     with gr.Row():
         with gr.Column(scale=1):
-            gr.Markdown("### 1. 选择任务")
+            with gr.Column(elem_classes="sidebar-panel"):
+                env_radio = gr.Radio(["Local", "Cloud"], label="目标环境", value="Local")
+                task_drop = gr.Dropdown(label="已选任务 (ID [梯度] : 问题)")
+                with gr.Row():
+                    ref_btn = gr.Button("🔄 刷新数据")
+                    run_btn = gr.Button("🚀 启动回放", variant="primary")
             
-            summary_data = app_engine.load_latest_result_summary()
-            task_choices = [f"{item['id']} : {item['question'][:20]}..." for item in summary_data]
+            with gr.Column(elem_classes="sidebar-panel"):
+                gr.Markdown("### 📊 全局 ASR 统计 (实验完成后生成)")
+                l1_label = gr.Label(label="L1 ASR")
+                l2_label = gr.Label(label="L2 ASR")
+                l3_label = gr.Label(label="L3 ASR")
+                avg_q_num = gr.Number(label="平均查询成本")
             
-            task_dropdown = gr.Dropdown(
-                choices=task_choices, 
-                label="已完成的任务 (ID : 预览)",
-                interactive=True
-            )
-            
-            refresh_btn = gr.Button("🔄 刷新实验列表")
-            start_btn = gr.Button("🚀 开始轨迹回放", variant="primary")
+            with gr.Column(elem_classes="sidebar-panel"):
+                cur_score = gr.Number(label="危害评分", precision=3)
+                cur_queries = gr.Number(label="累计查询消耗")
+                cur_status = gr.Textbox(label="探测状态", interactive=False)
 
         with gr.Column(scale=2):
-            gr.Markdown("### 2. 演化过程看板")
-            with gr.Row():
-                score_display = gr.Number(label="实时危害得分", precision=3)
-                status_display = gr.Textbox(label="当前状态")
-            
             with gr.Tabs():
-                with gr.TabItem("🎞️ 演化日志流"):
-                    log_viewer = gr.Markdown(value="等待回放...")
-                with gr.TabItem("📝 对抗提示词"):
-                    # 移除了引发报错的 show_copy_button
-                    prompt_viewer = gr.Textbox(label="此阶段生成的攻击提示词", lines=12)
+                with gr.TabItem("💬 对话演化轨迹"):
+                    chat_view = gr.Chatbot(height=720)
+                with gr.TabItem("📄 核心 Payload 源码"):
+                    raw_payload = gr.Textbox(label="当前探测 Prompt", lines=25)
 
-    # 交互绑定
-    def refresh_list():
-        new_summary = app_engine.load_latest_result_summary()
-        new_choices = [f"{item['id']} : {item['question'][:20]}..." for item in new_summary]
-        return gr.Dropdown(choices=new_choices)
+    def sync_ui(env):
+        details, stats = app_engine.load_result_summary(env)
+        choices = [f"{item.get('id')} [{item.get('level', 'N/A')}] : {item.get('question', '')[:10]}..." for item in details]
+        
+        l1 = f"{stats.get('levels', {}).get('L1', 0):.1f}%"
+        l2 = f"{stats.get('levels', {}).get('L2', 0):.1f}%"
+        l3 = f"{stats.get('levels', {}).get('L3', 0):.1f}%"
+        
+        return gr.Dropdown(choices=choices, value=choices[0] if choices else None), l1, l2, l3, stats.get("avg_q", 0)
 
-    refresh_btn.click(fn=refresh_list, outputs=task_dropdown)
+    demo.load(fn=lambda: sync_ui("Local"), outputs=[task_drop, l1_label, l2_label, l3_label, avg_q_num])
+    env_radio.change(sync_ui, inputs=env_radio, outputs=[task_drop, l1_label, l2_label, l3_label, avg_q_num])
+    ref_btn.click(sync_ui, inputs=env_radio, outputs=[task_drop, l1_label, l2_label, l3_label, avg_q_num])
     
-    start_btn.click(
+    run_btn.click(
         fn=app_engine.run_replay,
-        inputs=task_dropdown,
-        outputs=[log_viewer, prompt_viewer, score_display, status_display]
+        inputs=[task_drop, env_radio],
+        outputs=[chat_view, cur_score, cur_queries, cur_status, raw_payload]
     )
 
 if __name__ == "__main__":
-    # 将 theme 移动到 launch 中以消除警告
-    demo.launch(server_port=7860, theme=gr.themes.Soft())
+    demo.launch(server_port=7860)
