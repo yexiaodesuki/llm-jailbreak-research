@@ -11,13 +11,21 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOGS_DIR = os.path.join(BASE_DIR, "logs")
 RESULTS_DIR = os.path.join(BASE_DIR, "results")
 
+# 目录映射字典
+DIR_MAPPING = {
+    "基准版 (QueryOpt)": "local_targeted",
+    "改进版 (MEGA)": "improved_targeted"
+}
+
 class ReplayApp:
     def __init__(self):
-        self.current_env = "local"
+        self.current_env = "基准版 (QueryOpt)"
 
     def load_result_summary(self, env):
         """加载实验结果汇总并计算统计指标"""
-        target_dir = os.path.join(RESULTS_DIR, env.lower())
+        # 核心逻辑：根据选择的版切换子目录
+        sub_dir = DIR_MAPPING.get(env, "local_targeted")
+        target_dir = os.path.join(RESULTS_DIR, sub_dir)
         
         # 1. 尝试寻找汇总 JSON 文件
         list_of_files = glob.glob(os.path.join(target_dir, "*.json"))
@@ -43,7 +51,7 @@ class ReplayApp:
                 pass
 
         # 2. 如果 results 为空，直接从 logs 文件夹反向生成任务列表
-        log_dir = os.path.join(LOGS_DIR, env.lower())
+        log_dir = os.path.join(LOGS_DIR, sub_dir)
         trace_files = glob.glob(os.path.join(log_dir, "task_*_trace.jsonl"))
         
         if trace_files:
@@ -63,8 +71,10 @@ class ReplayApp:
 
     def get_trace_logs(self, task_id, env):
         """读取对应的轨迹日志文件"""
-        log_path = os.path.join(LOGS_DIR, env.lower(), f"task_{task_id}_trace.jsonl")
+        sub_dir = DIR_MAPPING.get(env, "local_targeted")
+        log_path = os.path.join(LOGS_DIR, sub_dir, f"task_{task_id}_trace.jsonl")
         
+        # 兼容性处理
         if not os.path.exists(log_path):
             log_path = os.path.join(LOGS_DIR, f"task_{task_id}_trace.jsonl")
         
@@ -117,14 +127,12 @@ class ReplayApp:
             raw_res = step.get("response", "").strip()
             score_color = "#2ecc71" if score < 0.5 else ("#f1c40f" if score < 0.8 else "#e74c3c")
             
-            # --- 修复渲染 Bug: 强制闭合代码块 ---
             if raw_res.count("```") % 2 != 0:
                 raw_res += "\n\n```"
             
             if "[Cloud_Blocked]" in raw_res:
                 bot_content = "🚫 **安全网关强力拦截**\n输出已被实时切断。"
             else:
-                # 增加三个空行和独立样式的 div 块，防止 Markdown 渲染器将 HTML 吞入上文代码块
                 bot_content = (
                     f"{raw_res}\n\n\n"
                     f"<div style='border-top: 1px dashed #ccc; padding-top: 8px; margin-top: 10px; "
@@ -148,7 +156,8 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue"), css=css) as demo:
     with gr.Row():
         with gr.Column(scale=1):
             with gr.Column(elem_classes="sidebar-panel"):
-                env_radio = gr.Radio(["Local", "Cloud"], label="目标环境", value="Local")
+                # 将原来的 Local/Cloud 替换为版本选择
+                env_radio = gr.Radio(["基准版 (QueryOpt)", "改进版 (MEGA)"], label="实验版本切换", value="基准版 (QueryOpt)")
                 task_drop = gr.Dropdown(label="已选任务 (ID [梯度] : 问题)")
                 with gr.Row():
                     ref_btn = gr.Button("🔄 刷新数据")
@@ -183,7 +192,8 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue"), css=css) as demo:
         
         return gr.Dropdown(choices=choices, value=choices[0] if choices else None), l1, l2, l3, stats.get("avg_q", 0)
 
-    demo.load(fn=lambda: sync_ui("Local"), outputs=[task_drop, l1_label, l2_label, l3_label, avg_q_num])
+    # 加载和切换事件
+    demo.load(fn=lambda: sync_ui("基准版 (QueryOpt)"), outputs=[task_drop, l1_label, l2_label, l3_label, avg_q_num])
     env_radio.change(sync_ui, inputs=env_radio, outputs=[task_drop, l1_label, l2_label, l3_label, avg_q_num])
     ref_btn.click(sync_ui, inputs=env_radio, outputs=[task_drop, l1_label, l2_label, l3_label, avg_q_num])
     
