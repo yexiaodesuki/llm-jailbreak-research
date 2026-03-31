@@ -38,14 +38,14 @@ def main():
         print(f"\n[Error] 初始化失败: {e}")
         return
 
-    # --- 2. 目录准备 (关键修改：适配 app.py 的 improved_targeted 路径) ---
+    # --- 2. 目录准备 (适配 app.py 的 improved_targeted 路径) ---
     res_dir = Path("results") / "improved_targeted"
     log_dir = Path("logs") / "improved_targeted"
     res_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
 
     # --- 3. 数据加载 ---
-    data_path = "data/harmful_questions.json"
+    data_path = "data/jailbreakbench_50.json"
     if not os.path.exists(data_path):
         print(f"[Error] 未找到数据文件: {data_path}")
         return
@@ -67,11 +67,10 @@ def main():
     for item in questions_data:
         question = item["question"]
         task_id = item.get('id', '999')
-        task_level = item.get('level', 'N/A')
         
-        print(f"\n[Task {task_id}] Level: {task_level} | Target: {question[:25]}...")
+        print(f"\n[Task {task_id}] | Target: {question[:25]}...")
         
-        # 设置追踪日志路径 (关键修改：必须符合 task_{id}_trace.jsonl 格式以便 app.py 识别)
+        # 设置追踪日志路径 (必须符合 task_{id}_trace.jsonl 格式以便 app.py 识别)
         attacker.current_log_path = str(log_dir / f"task_{task_id}_trace.jsonl")
         
         # 如果旧日志存在则清理，确保回放的是最新数据
@@ -97,7 +96,6 @@ def main():
 
         record = {
             "id": task_id,
-            "level": task_level, 
             "question": question,
             "success": success,
             "queries_used": queries,

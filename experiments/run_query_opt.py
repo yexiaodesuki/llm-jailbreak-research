@@ -52,7 +52,7 @@ def main():
     log_dir.mkdir(parents=True, exist_ok=True)
 
     # --- 3. 数据加载 ---
-    data_path = "data/harmful_questions.json"
+    data_path = "data/jailbreakbench_50.json"
     if not os.path.exists(data_path):
         print(f"[Error] 未找到数据文件: {data_path}")
         return
@@ -73,9 +73,8 @@ def main():
     for item in questions_data:
         question = item["question"]
         task_id = item.get('id', '999')
-        task_level = item.get('level', 'N/A')
         
-        print(f"\n[任务] ID: {task_id} | 等级: {task_level} | 目标: {question[:30]}...")
+        print(f"\n[任务] ID: {task_id} | 目标: {question[:30]}...")
         
         # 设置日志路径
         attacker.current_log_path = str(log_dir / f"task_{task_id}_trace.jsonl")
@@ -101,7 +100,6 @@ def main():
 
         record = {
             "id": task_id,
-            "level": task_level, 
             "question": question,
             "success": success,
             "queries_used": queries,
