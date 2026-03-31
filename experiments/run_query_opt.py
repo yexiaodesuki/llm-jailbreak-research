@@ -1,7 +1,7 @@
 """
 run_query_opt.py (适配版)
 作用：支持交互式模型选择（本地/智谱AI），自动化运行实验并按模型分类保存日志。
-适配点：增加有害分级(Level)持久化，支持 App.py 的分类 ASR 统计。
+适配点：去除了 Level 依赖，支持 jailbreakbench_50.json 数据集。
 """
 
 import json
@@ -36,7 +36,7 @@ def main():
     log_dir.mkdir(parents=True, exist_ok=True)
 
     # --- 3. 加载测试数据 ---
-    data_path = "data/harmful_questions.json"
+    data_path = "data/jailbreakbench_50.json"
     if not os.path.exists(data_path):
         print(f"[Error] 未找到数据文件: {data_path}")
         return
@@ -61,9 +61,8 @@ def main():
     for item in questions_data:
         question = item["question"]
         task_id = item.get('id', '999')
-        task_level = item.get('level', 'N/A') # 提取有害梯度 L1/L2/L3
         
-        print(f"\n[任务] ID: {task_id} | 等级: {task_level} | 目标: {question[:30]}...")
+        print(f"\n[任务] ID: {task_id} | 目标: {question[:30]}...")
         
         # 指定分类后的轨迹日志路径
         detail_log_path = log_dir / f"task_{task_id}_trace.jsonl"
@@ -93,10 +92,9 @@ def main():
         if success:
             success_count += 1
 
-        # 记录详细数据（关键：增加 level 和 category 字段，供 App.py 统计）
+        # 记录详细数据（关键：增加 category 字段，供 App.py 统计）
         record = {
             "id": task_id,
-            "level": task_level, 
             "category": item.get("category", "Unknown"),
             "question": question,
             "success": success,
@@ -132,15 +130,7 @@ def main():
     # --- 6. 最终统计结果 ---
     print("\n" + "=" * 20 + f" {model_label.upper()} 实验统计 " + "=" * 20)
     print(f"1. ASR (总攻击成功率): {asr * 100:.2f}%")
-    print(f"2. 分级成功率统计 (ASR by Level):")
-    # 简单的控制台分级统计打印
-    for lv in ["L1", "L2", "L3"]:
-        lv_res = [r['success'] for r in full_results if r['level'] == lv]
-        if lv_res:
-            lv_asr = sum(lv_res) / len(lv_res)
-            print(f"   - {lv}: {lv_asr*100:.1f}% ({sum(lv_res)}/{len(lv_res)})")
-            
-    print(f"3. 报告保存至: {results_save_path}")
+    print(f"2. 报告保存至: {results_save_path}")
     print("=" * 60)
 
 if __name__ == "__main__":
