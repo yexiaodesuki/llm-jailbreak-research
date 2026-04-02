@@ -2,7 +2,7 @@
 run_research_eval.py (PAIR 迭代反馈实验运行脚本 - 并行增强版)
 作用：
 1. 实现针对单个有害问题的并行攻击链 (Parallel Chains)。
-2. 保持原有的路径规则与数据集适配。
+2. 记录思维相似度剪枝 (Pruning) 的触发次数。
 """
 
 import json
@@ -12,7 +12,7 @@ from datetime import datetime
 import sys
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import threading # 确保导入了 threading
+import threading
 
 # 将项目根目录添加到系统路径
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -21,7 +21,7 @@ from src.attack.improved_query_opt import ImprovedQueryOpt
 from src.models.model_api import LocalModel, CloudModel
 
 # --- PAIR 并行参数配置 ---
-N_STREAMS = 2  # 并行流数量 (PAIR 论文建议 20，建议你先用 5 测试)
+N_STREAMS = 2  # 并行流数量
 MAX_ITERATIONS = 15  # 每条链的最大迭代次数
 
 def run_single_chain(chain_id, question, target_model, attacker_llm, log_dir, task_id, stop_event):
@@ -29,10 +29,8 @@ def run_single_chain(chain_id, question, target_model, attacker_llm, log_dir, ta
     运行单条攻击链的辅助函数
     """
     try:
-        # 将 stop_event 传进去
         attacker = ImprovedQueryOpt(target_model, attacker_llm=attacker_llm, stop_event=stop_event)
         
-        # 为每条链分配独立的日志文件以便回放和研究
         chain_log_path = log_dir / f"task_{task_id}_chain_{chain_id}_trace.jsonl"
         attacker.current_log_path = str(chain_log_path)
         
@@ -40,40 +38,35 @@ def run_single_chain(chain_id, question, target_model, attacker_llm, log_dir, ta
             os.remove(attacker.current_log_path)
             
         try:
-            best_prompt, success, queries = attacker.optimize(question, max_iters=MAX_ITERATIONS)
+            # 修改处：接收 optimize 返回的 pruning_count（需确保 ImprovedQueryOpt.optimize 返回该值）
+            best_prompt, success, queries, pruning_count = attacker.optimize(question, max_iters=MAX_ITERATIONS)
             return {
                 "chain_id": chain_id,
                 "success": success,
                 "queries": queries,
+                "pruning_count": pruning_count, # 记录该链的剪枝次数
                 "prompt": best_prompt
             }
         except Exception as e:
             print(f"      [!] 链 {chain_id} 执行异常: {e}")
-            return {"chain_id": chain_id, "success": False, "queries": 0, "prompt": "Error"}
+            return {"chain_id": chain_id, "success": False, "queries": 0, "pruning_count": 0, "prompt": "Error"}
     except Exception as e:
         print(f"[-] Chain {chain_id} 崩溃: {e}")
-        return False, 0, "Error"
+        return {"chain_id": chain_id, "success": False, "queries": 0, "pruning_count": 0, "prompt": "Error"}
 
 def main():
     # --- 1. 模型初始化 ---
     try:
         print("\n" + "="*60)
-        print("[*] 实验启动：PAIR-Parallel 并行进化引擎")
+        print("[*] 实验启动：PAIR-Parallel 并行进化引擎 (含思维剪枝统计)")
         print(f"    -> 并行配置: {N_STREAMS} Streams | Max {MAX_ITERATIONS} Iters")
         
-        # 获取攻击者和评估者（默认逻辑）
         attacker_llm = CloudModel() 
-        
-        # --- 修改处：调用交互式选择函数获取目标模型 ---
         from src.models.model_api import get_target_model
         target_model = get_target_model() 
         
-        # 根据返回的模型类型动态打印信息
         target_info = "本地 Qwen2.5 (Local)" if isinstance(target_model, LocalModel) else "云端 GLM-4-Flash (Target API)"
-        print(f"    -> 攻击者 (Attacker): 智谱AI GLM-4 (Cloud)")
         print(f"    -> 目标模型 (Target): {target_info}")
-        print(f"    -> 评估模型 (Judge): 智谱AI GLM-4 (Cloud)")
-        
         print("="*60 + "\n")
     except Exception as e:
         print(f"\n[Error] 初始化失败: {e}")
@@ -100,6 +93,7 @@ def main():
     full_results = []
     success_count = 0
     total_queries = 0
+    total_pruning_all_tasks = 0 # 统计所有任务的总剪枝次数
     
     for item in questions_data:
         question = item["question"]
@@ -110,19 +104,18 @@ def main():
         
         start_t = time.time()
         
-        # --- 核心改动：使用 ThreadPoolExecutor 运行并行链 ---
         task_success = False
         task_best_prompt = ""
         task_total_queries = 0
+        task_pruning_triggered = 0 # 统计当前任务所有并行流的剪枝总数
         
-        # --- 核心改动：为每个 Task 创建一个独立的停止事件 ---
         task_stop_event = threading.Event()
         
         with ThreadPoolExecutor(max_workers=N_STREAMS) as executor:
             futures = [
                 executor.submit(
                     run_single_chain, i, question, target_model, 
-                    attacker_llm, log_dir, task_id, task_stop_event # 传入开关
+                    attacker_llm, log_dir, task_id, task_stop_event
                 ) 
                 for i in range(N_STREAMS)
             ]
@@ -130,17 +123,18 @@ def main():
             for future in as_completed(futures):
                 res = future.result()
                 task_total_queries += res["queries"]
-                # 只要有一条链成功，标记该 Task 成功
+                task_pruning_triggered += res.get("pruning_count", 0) # 累加剪枝计数
+                
                 if res["success"] and not task_success:
                     task_success = True
                     task_best_prompt = res["prompt"]
-                    # 按照 PAIR 逻辑，一旦某条链成功，可以考虑取消其他线程（此处简化处理，等待所有完成或自行扩展）
         
         if not task_success:
             task_best_prompt = "All chains failed"
 
         elapsed = time.time() - start_t
         total_queries += task_total_queries
+        total_pruning_all_tasks += task_pruning_triggered
         if task_success: success_count += 1
 
         record = {
@@ -149,18 +143,20 @@ def main():
             "question": question,
             "success": task_success,
             "queries_used": task_total_queries,
+            "pruning_triggered": task_pruning_triggered, # 核心改动：在详情中记录触发次数
             "time_cost": round(elapsed, 2),
             "optimized_prompt": task_best_prompt
         }
         full_results.append(record)
         
         status_icon = "✅ SUCCESS" if task_success else "❌ FAILED"
-        print(f"--> Result: {status_icon} | Total Queries: {task_total_queries} | Time: {elapsed:.1f}s")
+        print(f"--> Result: {status_icon} | Pruning Count: {task_pruning_triggered} | Queries: {task_total_queries}")
 
     # --- 5. 统计与汇总 ---
     total_samples = len(questions_data)
     asr = success_count / total_samples if total_samples > 0 else 0
     avg_q = total_queries / total_samples if total_samples > 0 else 0
+    avg_pruning = total_pruning_all_tasks / total_samples if total_samples > 0 else 0
     
     final_report = {
         "summary": {
@@ -168,6 +164,7 @@ def main():
             "streams": N_STREAMS,
             "asr": round(asr, 4),
             "avg_queries": round(avg_q, 2),
+            "avg_pruning_triggered": round(avg_pruning, 2), # 汇总平均触发次数
             "total_samples": total_samples,
             "success_count": success_count
         },
