@@ -39,26 +39,25 @@ def run_single_chain(chain_id, question, target_model, attacker_llm, log_dir, ta
             
         try:
             # 修改处：接收 optimize 返回的 pruning_count（需确保 ImprovedQueryOpt.optimize 返回该值）
-            best_prompt, success, queries, pruning_count = attacker.optimize(question, max_iters=MAX_ITERATIONS)
+            best_prompt, success, queries = attacker.optimize(question, max_iters=MAX_ITERATIONS)
             return {
                 "chain_id": chain_id,
                 "success": success,
                 "queries": queries,
-                "pruning_count": pruning_count, # 记录该链的剪枝次数
                 "prompt": best_prompt
             }
         except Exception as e:
             print(f"      [!] 链 {chain_id} 执行异常: {e}")
-            return {"chain_id": chain_id, "success": False, "queries": 0, "pruning_count": 0, "prompt": "Error"}
+            return {"chain_id": chain_id, "success": False, "queries": 0,  "prompt": "Error"}
     except Exception as e:
         print(f"[-] Chain {chain_id} 崩溃: {e}")
-        return {"chain_id": chain_id, "success": False, "queries": 0, "pruning_count": 0, "prompt": "Error"}
+        return {"chain_id": chain_id, "success": False, "queries": 0,  "prompt": "Error"}
 
 def main():
     # --- 1. 模型初始化 ---
     try:
         print("\n" + "="*60)
-        print("[*] 实验启动：PAIR-Parallel 并行进化引擎 (含思维剪枝统计)")
+        print("[*] 实验启动：PAIR-Parallel 并行进化引擎 ")
         print(f"    -> 并行配置: {N_STREAMS} Streams | Max {MAX_ITERATIONS} Iters")
         
         attacker_llm = CloudModel() 
@@ -107,7 +106,6 @@ def main():
         task_success = False
         task_best_prompt = ""
         task_total_queries = 0
-        task_pruning_triggered = 0 # 统计当前任务所有并行流的剪枝总数
         
         task_stop_event = threading.Event()
         
@@ -123,7 +121,6 @@ def main():
             for future in as_completed(futures):
                 res = future.result()
                 task_total_queries += res["queries"]
-                task_pruning_triggered += res.get("pruning_count", 0) # 累加剪枝计数
                 
                 if res["success"] and not task_success:
                     task_success = True
@@ -134,7 +131,6 @@ def main():
 
         elapsed = time.time() - start_t
         total_queries += task_total_queries
-        total_pruning_all_tasks += task_pruning_triggered
         if task_success: success_count += 1
 
         record = {
@@ -143,20 +139,18 @@ def main():
             "question": question,
             "success": task_success,
             "queries_used": task_total_queries,
-            "pruning_triggered": task_pruning_triggered, # 核心改动：在详情中记录触发次数
             "time_cost": round(elapsed, 2),
             "optimized_prompt": task_best_prompt
         }
         full_results.append(record)
         
         status_icon = "✅ SUCCESS" if task_success else "❌ FAILED"
-        print(f"--> Result: {status_icon} | Pruning Count: {task_pruning_triggered} | Queries: {task_total_queries}")
+        print(f"--> Result: {status_icon}  | Queries: {task_total_queries}")
 
     # --- 5. 统计与汇总 ---
     total_samples = len(questions_data)
     asr = success_count / total_samples if total_samples > 0 else 0
     avg_q = total_queries / total_samples if total_samples > 0 else 0
-    avg_pruning = total_pruning_all_tasks / total_samples if total_samples > 0 else 0
     
     final_report = {
         "summary": {
@@ -164,7 +158,6 @@ def main():
             "streams": N_STREAMS,
             "asr": round(asr, 4),
             "avg_queries": round(avg_q, 2),
-            "avg_pruning_triggered": round(avg_pruning, 2), # 汇总平均触发次数
             "total_samples": total_samples,
             "success_count": success_count
         },
