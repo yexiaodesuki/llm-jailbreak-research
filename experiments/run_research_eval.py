@@ -80,8 +80,8 @@ def main():
         return
 
     # --- 2. 目录准备 ---
-    res_dir = Path("results") / "final_targeted"
-    log_dir = Path("logs") / "final_targeted"
+    res_dir = Path("results") / "base_v1"
+    log_dir = Path("logs") / "base_v1"
     res_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
 
