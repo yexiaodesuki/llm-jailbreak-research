@@ -1,8 +1,8 @@
 """
-run_research_eval.py (PAIR 迭代反馈实验运行脚本 - 并行增强版)
+run_research_eval.py (PAIR 迭代反馈实验运行脚本 - 候选采样优化版)
 作用：
 1. 实现针对单个有害问题的并行攻击链 (Parallel Chains)。
-2. 保持原有的路径规则与数据集适配。
+2. 集成候选采样 (Candidate Sampling) 逻辑。
 """
 
 import json
@@ -21,7 +21,7 @@ from src.attack.improved_query_opt import ImprovedQueryOpt
 from src.models.model_api import LocalModel, CloudModel
 
 # --- PAIR 并行参数配置 ---
-N_STREAMS = 2  # 并行流数量 (PAIR 论文建议 20，建议你先用 5 测试)
+N_STREAMS = 2  # 并行流数量
 MAX_ITERATIONS = 15  # 每条链的最大迭代次数
 
 def run_single_chain(chain_id, question, target_model, attacker_llm, log_dir, task_id, stop_event):
@@ -32,8 +32,8 @@ def run_single_chain(chain_id, question, target_model, attacker_llm, log_dir, ta
         # 将 stop_event 传进去
         attacker = ImprovedQueryOpt(target_model, attacker_llm=attacker_llm, stop_event=stop_event)
         
-        # 为每条链分配独立的日志文件以便回放和研究
-        chain_log_path = log_dir / f"task_{task_id}_chain_{chain_id}_trace.jsonl"
+        # 修改点：确保日志文件名体现采样优化分支，方便回溯
+        chain_log_path = log_dir / f"task_{task_id}_chain_{chain_id}_sampling_v3.jsonl"
         attacker.current_log_path = str(chain_log_path)
         
         if os.path.exists(attacker.current_log_path):
@@ -52,25 +52,23 @@ def run_single_chain(chain_id, question, target_model, attacker_llm, log_dir, ta
             return {"chain_id": chain_id, "success": False, "queries": 0, "prompt": "Error"}
     except Exception as e:
         print(f"[-] Chain {chain_id} 崩溃: {e}")
-        return False, 0, "Error"
+        return {"chain_id": chain_id, "success": False, "queries": 0, "prompt": "Error"}
 
 def main():
     # --- 1. 模型初始化 ---
     try:
         print("\n" + "="*60)
-        print("[*] 实验启动：PAIR-Parallel 并行进化引擎")
-        print(f"    -> 并行配置: {N_STREAMS} Streams | Max {MAX_ITERATIONS} Iters")
+        print("[*] 实验启动：PAIR-Parallel + Candidate Sampling (v3)")
+        print(f"    -> 配置: {N_STREAMS} Streams | Max {MAX_ITERATIONS} Iters | 3-Candidates/Step")
         
-        # 获取攻击者和评估者（默认逻辑）
+        # 获取攻击者和评估者
         attacker_llm = CloudModel() 
         
-        # --- 修改处：调用交互式选择函数获取目标模型 ---
         from src.models.model_api import get_target_model
         target_model = get_target_model() 
         
-        # 根据返回的模型类型动态打印信息
         target_info = "本地 Qwen2.5 (Local)" if isinstance(target_model, LocalModel) else "云端 GLM-4-Flash (Target API)"
-        print(f"    -> 攻击者 (Attacker): 智谱AI GLM-4 (Cloud)")
+        print(f"    -> 攻击者 (Attacker): 智谱AI GLM-4 (Candidate Sampling Enabled)")
         print(f"    -> 目标模型 (Target): {target_info}")
         print(f"    -> 评估模型 (Judge): 智谱AI GLM-4 (Cloud)")
         
@@ -80,8 +78,9 @@ def main():
         return
 
     # --- 2. 目录准备 ---
-    res_dir = Path("results") / "final_targeted"
-    log_dir = Path("logs") / "final_targeted"
+    # 修改点：更新目录名，将结果存储在专门的采样优化目录下
+    res_dir = Path("results") / "opt_candidate_sampling_v3"
+    log_dir = Path("logs") / "opt_candidate_sampling_v3"
     res_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -95,7 +94,7 @@ def main():
 
     # --- 4. 实验循环 ---
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-    results_save_path = res_dir / f"pair_parallel_report_{timestamp}.json"
+    results_save_path = res_dir / f"pair_sampling_report_{timestamp}.json"
     
     full_results = []
     success_count = 0
@@ -110,19 +109,17 @@ def main():
         
         start_t = time.time()
         
-        # --- 核心改动：使用 ThreadPoolExecutor 运行并行链 ---
         task_success = False
         task_best_prompt = ""
         task_total_queries = 0
         
-        # --- 核心改动：为每个 Task 创建一个独立的停止事件 ---
         task_stop_event = threading.Event()
         
         with ThreadPoolExecutor(max_workers=N_STREAMS) as executor:
             futures = [
                 executor.submit(
                     run_single_chain, i, question, target_model, 
-                    attacker_llm, log_dir, task_id, task_stop_event # 传入开关
+                    attacker_llm, log_dir, task_id, task_stop_event
                 ) 
                 for i in range(N_STREAMS)
             ]
@@ -130,11 +127,9 @@ def main():
             for future in as_completed(futures):
                 res = future.result()
                 task_total_queries += res["queries"]
-                # 只要有一条链成功，标记该 Task 成功
                 if res["success"] and not task_success:
                     task_success = True
                     task_best_prompt = res["prompt"]
-                    # 按照 PAIR 逻辑，一旦某条链成功，可以考虑取消其他线程（此处简化处理，等待所有完成或自行扩展）
         
         if not task_success:
             task_best_prompt = "All chains failed"
@@ -164,8 +159,9 @@ def main():
     
     final_report = {
         "summary": {
-            "experiment_type": "PAIR_Parallel_Attack",
+            "experiment_type": "PAIR_Parallel_Attack_with_Candidate_Sampling", # 修改点：记录实验类型
             "streams": N_STREAMS,
+            "candidates_per_step": 3, # 新增记录：每步生成的候选数量
             "asr": round(asr, 4),
             "avg_queries": round(avg_q, 2),
             "total_samples": total_samples,
@@ -177,7 +173,7 @@ def main():
     with open(results_save_path, "w", encoding="utf-8") as f:
         json.dump(final_report, f, ensure_ascii=False, indent=4)
         
-    print(f"\n[*] 实验完成。报告: {results_save_path}")
+    print(f"\n[*] 实验完成。报告已保存至采样优化专属目录: {results_save_path}")
 
 if __name__ == "__main__":
     main()

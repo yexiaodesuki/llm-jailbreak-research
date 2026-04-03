@@ -9,7 +9,7 @@ file_lock = threading.Lock()
 class ImprovedQueryOpt(QueryOpt):
     """
     完全参照 PAIR (Prompt Automatic Iterative Refinement) 论文实现的优化引擎。
-    针对并行化进行了线程安全适配。
+    针对并行化进行了线程安全适配，并已集成“候选采样 (Candidate Sampling)”优化。
     """
     def __init__(self, target_model, attacker_llm=None, stop_event=None):
         super().__init__(target_model, attacker_llm)
@@ -17,26 +17,27 @@ class ImprovedQueryOpt(QueryOpt):
         # 初始化时，如果子类没有定义，确保有一个基础路径
         if not hasattr(self, 'current_log_path'):
             self.current_log_path = "logs/default_trace.jsonl"
-        print("[+] PAIR 优化引擎已就绪：采用迭代反馈进化机制 (并行适配版)。")
+        
+        # 修改点：更新启动提示，明确当前处于候选采样优化分支
+        print("[+] PAIR 优化引擎已就绪：采用候选采样进化机制 (opt/mypair-candidate-sampling-v3)。")
 
     def optimize(self, question, max_iters=20):
         """
         PAIR 核心迭代循环：已增加全量轨迹记忆 (Full Trajectory Memory) 支撑。
+        优化点：调用支持多候选采样的生成器，提升每一轮进化的质量。
         """
-        # 1. 初始阶段：生成第一个攻击提示词
+        # 1. 初始阶段：生成第一个攻击提示词（内部已执行 3 选 1 采样）
         improvement, current_prompt = self.generator.generate_initial_prompt(question)
         total_queries = 0
         
-        # --- 新增：初始化全量轨迹记忆列表 ---
+        # --- 初始化全量轨迹记忆列表 ---
         trajectory_history = []
-        # -----------------------------------
 
         for i in range(max_iters):
-            # --- 核心改动：检查停止信号 ---
+            # --- 检查停止信号 ---
             if self.stop_event and self.stop_event.is_set():
                 print(f"    [!] 检测到其他线程已成功，链条提前终止。")
                 return current_prompt, False, total_queries
-            # ---------------------------
 
             # 2. 询问目标模型
             target_response = self.model.query(current_prompt)
@@ -59,7 +60,7 @@ class ImprovedQueryOpt(QueryOpt):
                 improvement=improvement
             )
 
-            # --- 新增：将当前轮次的所有信息存入轨迹历史 ---
+            # --- 将当前轮次的所有信息存入轨迹历史 ---
             trajectory_history.append({
                 "iter": i + 1,
                 "improvement": improvement,
@@ -68,24 +69,22 @@ class ImprovedQueryOpt(QueryOpt):
                 "score": score,
                 "reason": reason
             })
-            # -----------------------------------------
 
             # 4. 检查是否成功
             if self.judge.is_success(score):
-                # --- 核心改动：成功时合上开关 ---
+                # 成功时合上开关
                 if self.stop_event:
                     self.stop_event.set() 
-                # ---------------------------
                 return current_prompt, True, total_queries
 
-            # 5. 进化：将包含【全量轨迹历史】的反馈喂回给攻击者
+            # 5. 进化：调用升级后的 evolve_prompt（内部执行 3 选 1 采样）
             improvement, current_prompt = self.generator.evolve_prompt(
                 target_goal=question,
                 last_prompt=current_prompt,
                 last_response=target_response,
                 score=score,
                 reason=reason,
-                history=trajectory_history  # <--- 关键修改：传递全量记忆
+                history=trajectory_history
             )
 
         return current_prompt, False, total_queries
@@ -96,13 +95,14 @@ class ImprovedQueryOpt(QueryOpt):
         """
         log_entry = {
             "iter": iteration,
+            "optimization": "candidate_sampling_v3", # 修改点：在日志中显式标记优化版本
             "improvement_thought": improvement,
             "prompt": prompt,
             "response": response,
             "score": score,
             "reason": reason,
             "timestamp": time.time(),
-            "thread": threading.current_thread().name  # 记录线程名方便调试
+            "thread": threading.current_thread().name
         }
         
         # 使用全局锁，防止多个线程同时写入同一个文件导致 JSON 格式损坏
