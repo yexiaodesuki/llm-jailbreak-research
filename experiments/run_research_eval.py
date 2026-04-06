@@ -1,8 +1,9 @@
 """
-run_research_eval.py (PAIR 迭代反馈实验运行脚本 - 候选采样优化版)
+run_research_eval.py (PAIR 迭代反馈实验运行脚本 - v4 Hybrid 混合优化版)
 作用：
 1. 实现针对单个有害问题的并行攻击链 (Parallel Chains)。
 2. 集成候选采样 (Candidate Sampling) 逻辑。
+3. [v4 内部实现] 集成思维相似度检测，用于触发 Attacker 的多样性进化，但不进行额外统计显示。
 """
 
 import json
@@ -12,7 +13,7 @@ from datetime import datetime
 import sys
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import threading # 确保导入了 threading
+import threading 
 
 # 将项目根目录添加到系统路径
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -29,11 +30,10 @@ def run_single_chain(chain_id, question, target_model, attacker_llm, log_dir, ta
     运行单条攻击链的辅助函数
     """
     try:
-        # 将 stop_event 传进去
         attacker = ImprovedQueryOpt(target_model, attacker_llm=attacker_llm, stop_event=stop_event)
         
-        # 修改点：确保日志文件名体现采样优化分支，方便回溯
-        chain_log_path = log_dir / f"task_{task_id}_chain_{chain_id}_sampling_v3.jsonl"
+        # 确保日志文件名体现 v4 Hybrid 分支
+        chain_log_path = log_dir / f"task_{task_id}_chain_{chain_id}_hybrid_v4.jsonl"
         attacker.current_log_path = str(chain_log_path)
         
         if os.path.exists(attacker.current_log_path):
@@ -58,17 +58,16 @@ def main():
     # --- 1. 模型初始化 ---
     try:
         print("\n" + "="*60)
-        print("[*] 实验启动：PAIR-Parallel + Candidate Sampling (v3)")
-        print(f"    -> 配置: {N_STREAMS} Streams | Max {MAX_ITERATIONS} Iters | 3-Candidates/Step")
+        print("[*] 实验启动：PAIR v4 Hybrid (Candidate Sampling + Strategy Shift)")
+        print(f"    -> 配置: {N_STREAMS} Streams | Max {MAX_ITERATIONS} Iters")
         
-        # 获取攻击者和评估者
         attacker_llm = CloudModel() 
         
         from src.models.model_api import get_target_model
         target_model = get_target_model() 
         
         target_info = "本地 Qwen2.5 (Local)" if isinstance(target_model, LocalModel) else "云端 GLM-4-Flash (Target API)"
-        print(f"    -> 攻击者 (Attacker): 智谱AI GLM-4 (Candidate Sampling Enabled)")
+        print(f"    -> 攻击者 (Attacker): 智谱AI GLM-4 (Hybrid V4 Enabled)")
         print(f"    -> 目标模型 (Target): {target_info}")
         print(f"    -> 评估模型 (Judge): 智谱AI GLM-4 (Cloud)")
         
@@ -78,9 +77,8 @@ def main():
         return
 
     # --- 2. 目录准备 ---
-    # 修改点：更新目录名，将结果存储在专门的采样优化目录下
-    res_dir = Path("results") / "opt_candidate_sampling_v3"
-    log_dir = Path("logs") / "opt_candidate_sampling_v3"
+    res_dir = Path("results") / "opt_hybrid_v4"
+    log_dir = Path("logs") / "opt_hybrid_v4"
     res_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -94,7 +92,7 @@ def main():
 
     # --- 4. 实验循环 ---
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-    results_save_path = res_dir / f"pair_sampling_report_{timestamp}.json"
+    results_save_path = res_dir / f"pair_hybrid_report_{timestamp}.json"
     
     full_results = []
     success_count = 0
@@ -108,7 +106,6 @@ def main():
         print(f"\n[Task {task_id}] Category: {category} | Target: {question[:30]}...")
         
         start_t = time.time()
-        
         task_success = False
         task_best_prompt = ""
         task_total_queries = 0
@@ -150,6 +147,7 @@ def main():
         full_results.append(record)
         
         status_icon = "✅ SUCCESS" if task_success else "❌ FAILED"
+        # 保持简洁输出，不包含 pruning 统计
         print(f"--> Result: {status_icon} | Total Queries: {task_total_queries} | Time: {elapsed:.1f}s")
 
     # --- 5. 统计与汇总 ---
@@ -159,9 +157,9 @@ def main():
     
     final_report = {
         "summary": {
-            "experiment_type": "PAIR_Parallel_Attack_with_Candidate_Sampling", # 修改点：记录实验类型
+            "experiment_type": "PAIR_V4_Hybrid_Sampling_Shift", 
             "streams": N_STREAMS,
-            "candidates_per_step": 3, # 新增记录：每步生成的候选数量
+            "candidates_per_step": 3,
             "asr": round(asr, 4),
             "avg_queries": round(avg_q, 2),
             "total_samples": total_samples,
@@ -173,7 +171,7 @@ def main():
     with open(results_save_path, "w", encoding="utf-8") as f:
         json.dump(final_report, f, ensure_ascii=False, indent=4)
         
-    print(f"\n[*] 实验完成。报告已保存至采样优化专属目录: {results_save_path}")
+    print(f"\n[*] 实验完成。报告已保存: {results_save_path}")
 
 if __name__ == "__main__":
     main()
