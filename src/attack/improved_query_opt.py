@@ -23,10 +23,10 @@ class ImprovedQueryOpt(QueryOpt):
         # 修改点：明确当前处于 Hybrid v4 融合分支
         print("[+] PAIR 优化引擎已就绪：采用采样与剪枝混合进化机制 (opt/mypair-hybrid-v4)。")
 
-    def _is_thought_redundant(self, current_thought, history, threshold=0.85, patience=5):
+    def _is_thought_redundant(self, current_thought, history, threshold=0.85, patience=4):
         """
         [融合自 v2] 检查当前思维是否与历史轨迹中的失败思维存在高度冗余。
-        patience: 容忍重复的次数。第 5 次重复时触发剪枝警告。
+        patience: 容忍重复的次数。第 4 次重复时触发剪枝警告。
         """
         if not history or not current_thought:
             return False, 0
